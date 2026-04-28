@@ -225,6 +225,170 @@ class QuerySearchController extends Controller
         ]);
     }
 
+    public function searx(Request $request)
+    {
+        $query = trim((string) $request->input('processedQuery', $request->input('q', '')));
+        $page = max(1, (int) $request->input('pageno', $request->input('page', 1)));
+        $perPage = (int) $request->input('per_page', 20);
+        $perPage = max(1, min($perPage, 50));
+
+        $categoriesRaw = strtolower((string) $request->input('categories', 'general'));
+        $categories = array_values(array_filter(array_map('trim', explode(',', $categoriesRaw))));
+        $category = $categories[0] ?? 'general';
+
+        if ($query === '') {
+            return response()->json([
+                'query' => '',
+                'category' => $category,
+                'number_of_results' => 0,
+                'results' => [],
+            ])->withHeaders($this->corsHeaders());
+        }
+
+        if ($category === 'images') {
+            [$imageResults, $totalResults] = $this->getTopImages($query, $page, $perPage);
+
+            $results = [];
+            foreach ($imageResults as $result) {
+                $results[] = [
+                    'url' => $result['page_url'] ?? '',
+                    'title' => $result['page_title'] ?? ($result['alt'] ?? 'Image'),
+                    'content' => $result['page_text'] ?? '',
+                    'img_src' => $result['_id'] ?? '',
+                    'thumbnail_src' => $result['_id'] ?? '',
+                    'category' => 'images',
+                    'engine' => 'wax-search',
+                ];
+            }
+
+            return response()->json([
+                'query' => $query,
+                'category' => 'images',
+                'number_of_results' => $totalResults,
+                'results' => $results,
+            ])->withHeaders($this->corsHeaders());
+        }
+
+        if ($category === 'videos') {
+            return response()->json([
+                'query' => $query,
+                'category' => 'videos',
+                'number_of_results' => 0,
+                'results' => [],
+            ])->withHeaders($this->corsHeaders());
+        }
+
+        $normalizedQuery = str_replace('+', ' ', $query);
+        $words = array_values(array_filter(explode(' ', strtolower($normalizedQuery))));
+        if (empty($words)) {
+            return response()->json([
+                'query' => $query,
+                'category' => 'general',
+                'number_of_results' => 0,
+                'results' => [],
+            ])->withHeaders($this->corsHeaders());
+        }
+
+        $countPipeline = [
+            ['$match' => ['word' => ['$in' => $words]]],
+            ['$group' => ['_id' => '$url']],
+            ['$count' => 'total']
+        ];
+
+        $countResult = DB::connection('mongodb')
+            ->table('words')
+            ->raw(fn($collection) => $collection->aggregate($countPipeline)->toArray());
+
+        $totalResults = isset($countResult[0]) ? $countResult[0]['total'] : 0;
+
+        $paginationPipeline = [
+            ['$match' => ['word' => ['$in' => $words]]],
+            [
+                '$group' => [
+                    '_id' => '$url',
+                    'cumWeight' => ['$sum' => '$weight'],
+                    'matchedWords' => ['$addToSet' => '$word'],
+                    'matchCount' => ['$sum' => 1]
+                ]
+            ],
+            ['$sort' => ['matchCount' => -1, 'cumWeight' => -1]],
+            ['$skip' => ($page - 1) * $perPage],
+            ['$limit' => $perPage]
+        ];
+
+        $paginatedResults = DB::connection('mongodb')
+            ->table('words')
+            ->raw(function ($collection) use ($paginationPipeline) {
+                $cursor = $collection->aggregate($paginationPipeline, ['cursor' => ['batchSize' => 20]]);
+                $results = [];
+                foreach ($cursor as $document) {
+                    $results[] = $document;
+                }
+                return $results;
+            });
+
+        $urls = array_map(fn($result) => $result['_id'], $paginatedResults);
+        $pageRank = DB::connection('mongodb')->table('pagerank')
+            ->whereIn('_id', $urls)
+            ->get();
+        $metadata = DB::connection('mongodb')->table('metadata')
+            ->whereIn('_id', $urls)
+            ->get();
+
+        $pageRankByUrl = [];
+        foreach ($pageRank as $rankRow) {
+            $pageRankByUrl[$rankRow->id] = (float) ($rankRow->rank ?? 0);
+        }
+
+        $metadataByUrl = [];
+        foreach ($metadata as $meta) {
+            $metadataByUrl[$meta->id] = $meta;
+        }
+
+        foreach ($paginatedResults as &$result) {
+            $resultMetadata = $metadataByUrl[$result['_id']] ?? null;
+            $result['description'] = $resultMetadata->description ?? '';
+            $result['summary_text'] = $resultMetadata->summary_text ?? '';
+            $result['title'] = $resultMetadata->title ?? '';
+            $result['pagerank'] = $pageRankByUrl[$result['_id']] ?? 0;
+            $result['combinedScore'] = (0.6 * $result['cumWeight']) + (0.4 * $result['pagerank']);
+        }
+
+        usort($paginatedResults, function ($a, $b) {
+            return $b['combinedScore'] <=> $a['combinedScore'];
+        });
+
+        $results = [];
+        foreach ($paginatedResults as $result) {
+            $url = $result['_id'] ?? '';
+            $meta = $metadataByUrl[$url] ?? null;
+            $host = parse_url($url, PHP_URL_HOST);
+            $favicon = $host ? 'https://www.google.com/s2/favicons?sz=64&domain=' . $host : null;
+
+            $snippet = $meta->summary_text ?? ($meta->description ?? '');
+            if ($snippet !== '' && strlen($snippet) > 240) {
+                $snippet = substr($snippet, 0, 240) . '...';
+            }
+
+            $results[] = [
+                'url' => $url,
+                'title' => $meta->title ?? $url,
+                'content' => $snippet,
+                'score' => $result['combinedScore'] ?? 0,
+                'favicon' => $favicon,
+                'category' => 'general',
+                'engine' => 'wax-search',
+            ];
+        }
+
+        return response()->json([
+            'query' => $query,
+            'category' => 'general',
+            'number_of_results' => $totalResults,
+            'results' => $results,
+        ])->withHeaders($this->corsHeaders());
+    }
+
     public function search(Request $request)
     {
         $hasSuggestions = $request->input('hasSuggestions');
@@ -303,6 +467,11 @@ class QuerySearchController extends Controller
             ->get();
 
         error_log('Page rank: ' . json_encode($pageRank));
+
+        $pageRankByUrl = [];
+        foreach ($pageRank as $rankRow) {
+            $pageRankByUrl[$rankRow->id] = (float) ($rankRow->rank ?? 0);
+        }
 
         $metadata = DB::connection('mongodb')->table('metadata')
             ->whereIn('_id', $urls)
@@ -464,6 +633,15 @@ class QuerySearchController extends Controller
             'status' => 'up',
             'dictionary' => $results,
         ]);
+    }
+
+    private function corsHeaders()
+    {
+        return [
+            'Access-Control-Allow-Origin' => env('CORS_ALLOWED_ORIGIN', '*'),
+            'Access-Control-Allow-Methods' => 'GET, OPTIONS',
+            'Access-Control-Allow-Headers' => 'Content-Type, Authorization',
+        ];
     }
 
 

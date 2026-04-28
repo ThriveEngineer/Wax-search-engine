@@ -10,6 +10,9 @@ use App\Http\Controllers\QuerySearchController;
 use App\Http\Controllers\RedisController;
 
 Route::get('/search', [QuerySearchController::class, 'search'])->middleware([FuzzySearch::class, StoreSearchTerm::class]);
+Route::get('/v1/search', [QuerySearchController::class, 'searx'])
+    ->middleware([FuzzySearch::class, StoreSearchTerm::class])
+    ->name('api.search.v1');
 Route::get('/search_images', [QuerySearchController::class, 'search_images']);
 Route::get('/dictionary', [QuerySearchController::class, 'get_dictionary'])->name('get.dictionary');
 Route::get('/search_force', [QuerySearchController::class, 'search'])->name('search_force');
