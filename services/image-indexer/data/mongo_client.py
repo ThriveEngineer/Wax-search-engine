@@ -229,9 +229,14 @@ class MongoClient:
         self, host="localhost", port=27017, password="", db="test", username=""
     ):
         try:
-            self.client = pymongo.MongoClient(
-                f"mongodb://{username}:{password}@{host}:{port}/{db}?authSource=admin"
-            )
+            if "mongodb+srv" in host or not port:
+                # Atlas / SRV style connection
+                connection_uri = f"mongodb+srv://{username}:{password}@{host.replace('mongodb+srv://', '')}/{db}?retryWrites=true&w=majority"
+            else:
+                # Standard direct connection
+                connection_uri = f"mongodb://{username}:{password}@{host}:{port}/{db}?authSource=admin"
+
+            self.client = pymongo.MongoClient(connection_uri)
             self.db = self.client[db]
 
             logger.info("Creating indexes...")
@@ -243,7 +248,7 @@ class MongoClient:
             self.client.admin.command("ping")
             logger.info("Successfully connected to mongo!")
         except Exception as e:
-            logger.error(f"Failed to connect to mongo")
+            logger.error(f"Failed to connect to mongo at {host}: {e}")
             self.client = None
 
     def perform_batch_operations(
