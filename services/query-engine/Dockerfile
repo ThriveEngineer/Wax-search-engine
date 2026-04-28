@@ -62,7 +62,7 @@ USER $user
 
 RUN apt-get update && apt-get install -y caddy && apt-get clean
 
-COPY Caddyfile /etc/caddy/Caddyfile
+RUN cp /var/www/Caddyfile /etc/caddy/Caddyfile
 
 EXPOSE 80
 
