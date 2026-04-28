@@ -60,8 +60,11 @@ RUN composer install --no-dev --optimize-autoloader
 
 USER $user
 
-EXPOSE 9000
+RUN apt-get update && apt-get install -y caddy && apt-get clean
+
+COPY Caddyfile /etc/caddy/Caddyfile
+
+EXPOSE 80
 
 ENTRYPOINT ["docker-entrypoint.sh"]
-
-CMD ["php-fpm"]
+CMD ["sh", "-c", "php-fpm -D && caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"]
